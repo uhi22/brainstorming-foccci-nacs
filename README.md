@@ -5,7 +5,7 @@ Statements marked **[verify]** come from memory or assumptions and must be check
 
 References:
 - Foccci hardware: https://openinverter.org/wiki/Foccci and https://github.com/uhi22/foccci (schematic analysis based on commit [b86fd34](https://github.com/uhi22/foccci/tree/b86fd341241138769f60162c21d3ca200bdf4482), "version 5")
-- Clara software: https://github.com/uhi22/ccs32clara (code review based on commit [7d151e8](https://github.com/uhi22/ccs32clara/tree/7d151e80972f61759a586a687b66ffecf9fa94c0), version 0.45)
+- Clara software: https://github.com/uhi22/ccs32clara (code review based on commit [94de233](https://github.com/uhi22/ccs32clara/tree/94de233da14b674889938c4aa63063d4b4e65c90), version 1.00)
 - ZombieVerter VCU: https://github.com/damienmaguire/Stm32-vcu (code review based on commit [b061f84](https://github.com/damienmaguire/Stm32-vcu/tree/b061f840ea05aa3e6c761953e746dabed9d9a375))
 
 ## 1. Goal
@@ -52,7 +52,7 @@ Vehicle side (Foccci interfaces into the car):
 ```
 
 - Clara detects the mode from the CP signal, as it does today:
-  - 5 % PWM → DC (PLC, SLAC, DIN 70121), close DC contactors after pre-charge.
+  - 5 % PWM → DC (PLC, SLAC, DIN 70121 or ISO 15118-2), close DC contactors after pre-charge.
   - 8–97 % PWM → basic AC charging: lock, close AC relay, set state C, tell the OBC the current limit via CAN.
 - DC contactors and AC relay are never closed at the same time (software interlock in Clara plus a hardware interlock).
 
@@ -165,14 +165,15 @@ Optional RF receiver to open the door with the button on the Tesla handle. Not p
 
 ### 4.8 CP and PP between Foccci and the OBC
 
-Only one vehicle-side CP circuit and one vehicle-side PP circuit may be connected to the inlet at a time. How AC and DC are combined is a per-vehicle architecture decision. The known solutions (separate inlets, changeover, CP spoofing by a VCU) and their CP and PP handling are described in [Q1 in section 10](#q1-what-do-we-do-with-cp-and-pp-when-both-foccci-and-the-obc-want-to-use-them).
+Only one vehicle-side CP circuit and one vehicle-side PP circuit may be connected to the inlet at a time. How AC and DC are combined is a per-vehicle architecture decision. The known solutions (separate inlets, changeover, CP spoofing by a VCU, OBC owns the state-B/C resistors) and their CP and PP handling are described in [Q1 in section 10](#q1-what-do-we-do-with-cp-and-pp-when-both-foccci-and-the-obc-want-to-use-them).
 
 ## 5. Software concept (Clara)
 
-### 5.1 What already works (from code review of Clara 0.45)
+### 5.1 What already works (from code review of Clara 1.00, commit 94de233)
 
-- DC: HomePlug/SLAC, SDP, TCP, DIN 70121 charging loop, cable check, pre-charge, welding detection. Charging on Tesla Superchargers in Europe (CCS2) has been shown in 2023.
-- AC basic charging: CP duty → `EvseAcCurrentLimit` up to 80 A ([ccs/acOBC.cpp](https://github.com/uhi22/ccs32clara/blob/7d151e80972f61759a586a687b66ffecf9fa94c0/ccs/acOBC.cpp)), state C via 1k3, lock handling, OBC state via CAN (`AcObcState`, `AcChargeControl` CAN or standalone).
+- DC: HomePlug/SLAC, SDP, TCP, cable check, pre-charge, welding detection. Charging on Tesla Superchargers in Europe (CCS2) has been shown in 2023.
+- DC protocols: DIN 70121 and ISO 15118-2 (DC, external payment only; no TLS, no Plug & Charge), selectable with the parameter `V2gProtocols` (DinOnly, IsoThenDin, DinThenIso, IsoOnly; default DinOnly). Details: [doc/iso15118-2.md](https://github.com/uhi22/ccs32clara/blob/94de233da14b674889938c4aa63063d4b4e65c90/doc/iso15118-2.md).
+- AC basic charging: CP duty → `EvseAcCurrentLimit` up to 80 A ([ccs/acOBC.cpp](https://github.com/uhi22/ccs32clara/blob/94de233da14b674889938c4aa63063d4b4e65c90/ccs/acOBC.cpp)), state C via 1k3, lock handling, OBC state via CAN (`AcObcState`, `AcChargeControl` CAN or standalone). With `ExternalStateCResistor = 1`, Clara does not switch state C in AC mode and leaves it to the OBC (see Q1, option CP-D).
 - PP resistance measurement with several hardware variants (`ppvariant` 0–5), `PlugPresent` (R < 5 kΩ).
 - Two contactor outputs with sequential switch-on and economizer.
 
@@ -187,13 +188,13 @@ Only one vehicle-side CP circuit and one vehicle-side PP circuit may be connecte
 
 ### 5.3 Not planned for the first step
 
-- ISO 15118-2 (Clara only has DIN 70121 today). Needed for Plug & Charge, and maybe at some chargers.
-- ISO 15118-2 AC high-level communication.
+- Plug & Charge (ISO 15118-2 with TLS and certificates). Clara supports ISO 15118-2 with external payment only.
+- ISO 15118-2 AC high-level communication (Clara's ISO 15118-2 support covers DC only).
 - Tesla's legacy proprietary protocol (single-wire CAN on CP, used by older Tesla vehicles on V2 Superchargers) **[verify]**.
 
 ## 6. Charger compatibility and authorization (to clarify)
 
-- Do Tesla Superchargers (V3/V4, North America) accept a DIN 70121-only vehicle at a native NACS cable? **[verify]**
+- Which protocol do Tesla Superchargers (V3/V4, North America) choose at a native NACS cable, DIN 70121 or ISO 15118-2 (external payment)? Clara can offer both (`V2gProtocols`). **[verify]**
 - V2 Superchargers are not opened for non-Tesla vehicles **[verify]**.
 - Session start for a non-Tesla vehicle: Tesla app (choose the stall) or Plug & Charge (needs ISO 15118-2 and certificates). Does Autocharge (EVCCID = MAC) play a role?
 - Voltage range: V3 up to about 500 V, V4 cabinets up to about 1000 V **[verify]**. Relevant for the battery voltage of the target vehicle.
@@ -213,6 +214,7 @@ The new Foccci hardware version is an output of this concept. The requirements c
 | HW3 | New hardware-variant resistor (new ID for Clara) | Clara must know that the new output exists | proposal |
 | HW4 | PP circuit suitable for J1772/J3400 (330 Ω pull-up, 2.7 kΩ pull-down on board or in the inlet), compatible with PP wakeup | NACS proximity | open (4.2) |
 | HW5 | Feedback input for the selector / contactor auxiliary contacts | Detect a stuck selector or welded contacts | open |
+| HW6 | State-B resistor R26 (2k7) as an assembly option or solder jumper | Q1 option CP-D: the OBC owns the state-B/C resistors; today R26 must be removed by hand | proposal |
 
 ## 9. Open questions
 
@@ -221,7 +223,7 @@ The new Foccci hardware version is an output of this concept. The requirements c
 3. AC/DC switching: preferred option (A, C, D or E in 4.1)? OBCs usually have no input relays, so B drops out. For E: who drives the selector relay (4.1.2: Foccci output, IO extender, or VCU), and is a feedback input available? B9 is GND on v5 (one of four GND pins: B3, B5, B9, B12) and is the candidate for a new output in a new board revision (harnesses are built for each installation, so this is no issue). Open: do the GND pins have different roles (PE reference compared with power return)?
 4. Shall the new Foccci version still support CCS2/CCS1 with the same board (configuration via parameter), or is it a NACS-only variant?
 5. Test possibilities: access to NACS chargers (North America), or only simulation (pyPLC as charger, AC EVSE simulator)?
-6. Scope: DIN 70121 only, or also ISO 15118-2 / Plug & Charge?
+6. Scope: DIN 70121 and ISO 15118-2 with external payment are available in Clara. Is Plug & Charge (TLS, certificates) needed for NACS?
 7. Wakeup: via CP, WAKEUP pin, or PP?
 
 ## 10. Questions and answers from the community
@@ -239,21 +241,21 @@ Answer:
 - CP: each vehicle-side CP circuit has the diode and the 2.74 kΩ state-B resistor. Two in parallel give about 1.37 kΩ, which is out of spec: the EVSE sees roughly state C without anybody requesting charging. arber333 saw this in practice when he tapped the CP for a second device: the Outlander OBC no longer pulled in the EVSE ([Outlander charger thread, page 4](https://openinverter.org/forum/viewtopic.php?t=628&start=75)).
 - PP: the same applies. Two pull-up / pull-down networks in parallel give wrong voltages, so neither device detects the plug and the cable coding correctly.
 
-**How AC and DC are combined is a per-vehicle architecture decision.** There is no general rule. Known solutions:
+**How AC and DC are combined is a per-vehicle architecture decision.** There is no general rule. Known solutions (prefix "CP-" to distinguish them from the power path options A–E in section 4.1):
 
-**A) Separate inlets for AC and DC**
+**CP-A) Separate inlets for AC and DC**
 - CP and PP: each inlet has its own CP and PP. The OBC uses the AC inlet, Foccci the DC inlet. No sharing.
 - For NACS: AC is then not charged via the NACS inlet, but via a second inlet (e.g. J1772).
 
-**B) Changeover relay or manual switch**, which connects the inlet either to Foccci or to the OBC. Also mentioned in the [Foccci wiki, "Using Foccci as a charge coordinator"](https://openinverter.org/wiki/Foccci).
+**CP-B) Changeover relay or manual switch**, which connects the inlet either to Foccci or to the OBC. Also mentioned in the [Foccci wiki, "Using Foccci as a charge coordinator"](https://openinverter.org/wiki/Foccci).
 - CP: is switched over.
 - PP: **unclear, depends on the OBC.** If the OBC has its own PP input, PP has to be switched over too. Then Foccci loses plug detection (and maybe the connector lock control) while the OBC owns the inlet. The Outlander OBC has no PP pin ([wiki: Mitsubishi Outlander DCDC OBC](https://openinverter.org/wiki/Mitsubishi_Outlander_DCDC_OBC)), so for it PP can stay with Foccci.
 - Open points: who decides the position (a manual switch can be forgotten; an automatic changeover needs a decision, e.g. from the PWM duty measured by Foccci); how the EVSE reacts to the short CP interruption; johu observed that the Outlander OBC only resumes after about 3 CP cycles ([Outlander charger thread, page 12](https://openinverter.org/forum/viewtopic.php?t=628&start=275)).
 
-**C) Foccci sits on the inlet, the VCU generates the CP PWM for the OBC.** This is already implemented in the ZombieVerter VCU (code at commit [b061f84](https://github.com/damienmaguire/Stm32-vcu/tree/b061f840ea05aa3e6c761953e746dabed9d9a375)):
+**CP-C) Foccci sits on the inlet, the VCU generates the CP PWM for the OBC.** This is already implemented in the ZombieVerter VCU (code at commit [b061f84](https://github.com/damienmaguire/Stm32-vcu/tree/b061f840ea05aa3e6c761953e746dabed9d9a375)):
 - Foccci measures the EVSE's PWM and sends the AC current limit, the port status, the plug state and the lock state in CAN message 0x357. ZombieVerter takes the AC limit as `PilotLim` ([Foccci.cpp, handle357](https://github.com/damienmaguire/Stm32-vcu/blob/b061f840ea05aa3e6c761953e746dabed9d9a375/src/Foccci.cpp#L122-L202)).
 - A ZombieVerter PWM output configured as `CpSpoof` generates a 1 kHz PWM with duty = `PilotLim` / 0.6 A per %, i.e. the same current limit as the EVSE signals ([utils.cpp, CpSpoofOutput](https://github.com/damienmaguire/Stm32-vcu/blob/b061f840ea05aa3e6c761953e746dabed9d9a375/src/utils.cpp#L622-L642)). The OBC's CP input is wired to this output.
-- ZombieVerter sends CAN message 0x358 to Foccci with `enable`, `AcObcState` and `AllowUnlock` ([Foccci.cpp, Task100Ms](https://github.com/damienmaguire/Stm32-vcu/blob/b061f840ea05aa3e6c761953e746dabed9d9a375/src/Foccci.cpp#L242-L281)). Clara then locks the connector and switches state C at the inlet ([Clara acOBC.cpp](https://github.com/uhi22/ccs32clara/blob/7d151e80972f61759a586a687b66ffecf9fa94c0/ccs/acOBC.cpp)).
+- ZombieVerter sends CAN message 0x358 to Foccci with `enable`, `AcObcState` and `AllowUnlock` ([Foccci.cpp, Task100Ms](https://github.com/damienmaguire/Stm32-vcu/blob/b061f840ea05aa3e6c761953e746dabed9d9a375/src/Foccci.cpp#L242-L281)). Clara then locks the connector and switches state C at the inlet ([Clara acOBC.cpp](https://github.com/uhi22/ccs32clara/blob/94de233da14b674889938c4aa63063d4b4e65c90/ccs/acOBC.cpp)).
 - For the Outlander OBC, ZombieVerter starts charging when Foccci is the charge interface and AC is requested ([outlanderCharger.cpp](https://github.com/damienmaguire/Stm32-vcu/blob/b061f840ea05aa3e6c761953e746dabed9d9a375/src/outlanderCharger.cpp#L106-L116)).
 - PP: Foccci measures PP at the inlet and reports the plug state via CAN. The OBC needs no PP (Outlander: no PP pin). For OBCs with a mandatory PP input: **unclear**, it would need a spoofed PP as well.
 - Open points:
@@ -261,10 +263,20 @@ Answer:
   - Handshake: in the current ZombieVerter code, `AcObcState` is always sent as 2 (Charging), and the `enable` bit decides whether Foccci switches state C. The OBC's own "pull in EVSE" is not fed back to Foccci. To be checked whether this is the intended behavior.
   - For NACS: Foccci must decode the J1772-style PP (latched / button pressed) and stop on the button. Not yet implemented in Clara (section 5.2).
 
+**CP-D) Foccci without its state-B resistor, the OBC controls state B/C in AC mode.** Proposed by johu as "option D" ([forum post](https://openinverter.org/forum/viewtopic.php?p=95832#p95832)).
+- CP: Foccci and the OBC are both connected to CP, but only the OBC has the state-B resistor. On Foccci v5, the CP circuit is the diode D14, then R26 = 2k7 to GND (state B), R27 = 1k2 switched by Q1 (state C) and R58 = 100k to the CP measurement ([pcb/outputdrivers.kicad_sch](https://github.com/uhi22/foccci/blob/b86fd341241138769f60162c21d3ca200bdf4482/pcb/outputdrivers.kicad_sch)). For option CP-D, R26 is removed.
+- AC: the OBC sees the real EVSE signal and switches state C itself. Clara does not switch state C in AC mode when the parameter `ExternalStateCResistor = 1` ([PR #84](https://github.com/uhi22/ccs32clara/pull/84), merged; [acOBC.cpp](https://github.com/uhi22/ccs32clara/blob/94de233da14b674889938c4aa63063d4b4e65c90/ccs/acOBC.cpp#L326-L333)). Foccci still measures the PWM and reports the AC current limit via CAN.
+- DC: unchanged. Clara switches state C with Foccci's R27, in parallel to the OBC's state-B resistor.
+- PP: not covered by option CP-D. If the OBC has no PP input (Outlander), PP stays with Foccci. For OBCs with their own PP input: **unclear**.
+- Hints:
+  - Check the CP input capacitance of the OBC. It adds to Foccci's own capacitance on CP (C76 = 1 nF) and could weaken the PLC signal needed for DC.
+  - Hardware: today R26 has to be removed by hand. For the next Foccci version, see HW6 in section 8.
+
 Summary:
 
 | Solution | CP | PP | Usable for AC via the NACS inlet |
 |---|---|---|---|
-| A) Separate inlets | separate | separate | no |
-| B) Changeover | switched | depends on the OBC: stays with Foccci if the OBC has no PP input, otherwise switched (unclear how) | yes |
-| C) CP spoofing by VCU | Foccci on the inlet, VCU feeds the OBC | Foccci; for OBCs that need PP: unclear | yes |
+| CP-A) Separate inlets | separate | separate | no |
+| CP-B) Changeover | switched | depends on the OBC: stays with Foccci if the OBC has no PP input, otherwise switched (unclear how) | yes |
+| CP-C) CP spoofing by VCU | Foccci on the inlet, VCU feeds the OBC | Foccci; for OBCs that need PP: unclear | yes |
+| CP-D) OBC owns state B/C | both on CP; Foccci without R26, OBC switches state C in AC mode | Foccci; for OBCs that need PP: unclear | yes |
